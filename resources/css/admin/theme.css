@@ -1,0 +1,24 @@
+/* Filament Admin Theme - RESET */
+@layer components {
+    /* Filament only */
+    .fi-body {
+        font-family: 'Almarai', sans-serif;
+    }
+
+    .fi-sidebar-item-label,
+    .fi-sidebar-group-label span {
+        font-weight: 900;
+        letter-spacing: 0.2px;
+    }
+
+    .fi-sidebar-item-active > a {
+        background-color: #7c3aed;
+        border-radius: 12px;
+        margin-inline: 10px;
+    }
+
+    .fi-sidebar-item-active span,
+    .fi-sidebar-item-active svg {
+        color: #ffffff;
+    }
+}
