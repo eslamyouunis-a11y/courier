@@ -2,84 +2,60 @@
 
 namespace Database\Seeders;
 
-use App\Models\User;
-use App\Models\Branch;
-use App\Models\Courier;
-use App\Models\Merchant;
-use App\Models\Governorate;
-use App\Models\Area;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\DB;
+use App\Models\{User, Branch, Courier, Merchant, Wallet, Governorate, Area};
 
 class DatabaseSeeder extends Seeder
 {
     public function run(): void
     {
-        // 1. حساب يونس (younis)
-        User::create([
-            'name' => 'younis',
-            'email' => 'younis@app.com',
-            'password' => Hash::make('12345678'),
-        ]);
+        DB::beginTransaction();
+        try {
+            // 1️⃣ حساب الإدارة (Admin)
+            $admin = User::updateOrCreate(
+                ['email' => 'younis@app.com'],
+                ['name' => 'Eslam Younis', 'password' => Hash::make('12345678')]
+            );
 
-        // 2. قائمة المحافظات والداتا الموسعة
-        $data = [
-            'القاهرة' => ['مدينة نصر', 'المعادي', 'التجمع الخامس', 'مصر الجديدة', 'شبرا', 'وسط البلد', 'حلوان'],
-            'الإسكندرية' => ['سموحة', 'ميامي', 'السيوف', 'محرم بك', 'العجمي', 'المنشية', 'لوران'],
-            'الجيزة' => ['الدقي', 'المهندسين', 'الهرم', 'فيصل', 'أكتوبر', 'الشيخ زايد'],
-            'القليوبية' => ['بنها', 'شبرا الخيمة', 'العبور', 'قليوب'],
-            'المنوفية' => ['شبين الكوم', 'قويسنا', 'السادات', 'منوف'],
-            'الشرقية' => ['الزقازيق', 'العاشر من رمضان', 'بلبيس'],
-            'الغربية' => ['طنطا', 'المحلة الكبرى', 'كفر الزيات'],
-            'الدقهلية' => ['المنصورة', 'طلخا', 'ميت غمر'],
-        ];
+            // 2️⃣ التأكد من وجود محفظة للشركة (Company Wallet)
+            Wallet::firstOrCreate(
+                ['owner_type' => 'company'],
+                ['balance' => 0]
+            );
 
-        foreach ($data as $govName => $areas) {
-            // إنشاء المحافظة
-            $governorate = Governorate::create(['name' => $govName]);
+            // 3️⃣ توليد محافظ لجميع الفروع الموجودة
+            $this->command->info('⏳ جاري إنشاء محافظ للفروع...');
+            Branch::all()->each(fn ($branch) => $this->createWalletIfNotExists($branch));
 
-            // 3. إنشاء الفرع وربطه بالمحافظة (حل المشكلة)
-            $branch = Branch::create([
-                'name' => $govName,
-                'governorate_id' => $governorate->id, // الربط المفتقد
-                'code' => 'BR-' . mt_rand(100, 999),
-            ]);
+            // 4️⃣ توليد محافظ لجميع المناديب
+            $this->command->info('⏳ جاري إنشاء محافظ للمناديب...');
+            Courier::all()->each(fn ($courier) => $this->createWalletIfNotExists($courier));
 
-            // 4. إنشاء المناطق
-            foreach ($areas as $areaName) {
-                Area::create([
-                    'name' => $areaName,
-                    'governorate_id' => $governorate->id
-                ]);
-            }
+            // 5️⃣ توليد محافظ لجميع التجار
+            $this->command->info('⏳ جاري إنشاء محافظ للتجار...');
+            Merchant::all()->each(fn ($merchant) => $this->createWalletIfNotExists($merchant));
 
-            // 5. إنشاء المناديب (بدون كابتن)
-            Courier::create([
-                'name' => 'أحمد ' . $govName,
-                'phone' => '010' . mt_rand(11111111, 99999999),
-                'branch_id' => $branch->id
-            ]);
+            DB::commit();
+            $this->command->info('✅ تم إنشاء محافظ لكل الناس بنجاح! السيستم جاهز للعمليات المالية الآن.');
 
-            Courier::create([
-                'name' => 'محمود ' . $govName,
-                'phone' => '011' . mt_rand(11111111, 99999999),
-                'branch_id' => $branch->id
-            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            $this->command->error('❌ خطأ في السيدر: ' . $e->getMessage());
         }
+    }
 
-        // 6. إنشاء تجار أساسيين
-        Merchant::create([
-            'name' => 'متجر الأناقة',
-            'phone' => '01555555555',
-            'branch_id' => 1 // مربوط بأول فرع (القاهرة)
+    /**
+     * دالة مساعدة لإنشاء محفظة فقط إذا لم تكن موجودة
+     */
+    private function createWalletIfNotExists($model): void
+    {
+        Wallet::firstOrCreate([
+            'owner_type' => get_class($model),
+            'owner_id' => $model->id,
+        ], [
+            'balance' => 0,
         ]);
-
-        Merchant::create([
-            'name' => 'تكنو ستور',
-            'phone' => '01000000000',
-            'branch_id' => 2 // مربوط بثاني فرع (الإسكندرية)
-        ]);
-
-        $this->command->info('تم إنشاء الداتا بنجاح: 8 محافظات، 8 فروع، 16 مندوب، وأكثر من 35 منطقة.');
     }
 }

@@ -14,4 +14,9 @@ class Area extends Model
     {
         return $this->belongsTo(Governorate::class);
     }
+    public function shippingFees()
+{
+    return $this->hasMany(AreaShippingFee::class);
+}
+
 }

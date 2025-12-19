@@ -4,159 +4,206 @@ namespace App\Filament\Resources;
 
 use App\Filament\Resources\ShipmentResource\Pages;
 use App\Models\Shipment;
-use App\Models\Area;
-use App\Models\User;
-use App\Models\Branch;
+use App\Models\Courier;
 use Filament\Forms;
 use Filament\Forms\Form;
 use Filament\Resources\Resource;
-use Filament\Infolists;
-use Filament\Infolists\Infolist;
-use Filament\Infolists\Components\TextEntry;
-use Filament\Infolists\Components\Section;
-use Filament\Infolists\Components\Grid;
-use Filament\Infolists\Components\Group;
 use Filament\Tables;
 use Filament\Tables\Table;
-use Filament\Support\Enums\FontWeight;
 use Filament\Notifications\Notification;
-use Illuminate\Support\HtmlString;
-use Picqer\Barcode\BarcodeGeneratorSVG;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Database\Eloquent\Collection;
 
 class ShipmentResource extends Resource
 {
     protected static ?string $model = Shipment::class;
-    protected static ?string $navigationIcon = 'heroicon-o-truck';
-    protected static ?string $navigationLabel = 'الشحنات';
-    protected static ?string $pluralModelLabel = 'الشحنات';
-    protected static ?string $modelLabel = 'شحنة';
+    protected static ?string $navigationIcon = 'heroicon-o-cube';
+    protected static ?string $navigationGroup = 'التشغيل';
+    protected static ?string $label = 'شحنة';
+    protected static ?string $pluralLabel = 'الشحنات';
 
-    public static function getTranslatedStatus(string $status): string
+    public static function form(Form $form): Form
     {
-        return match ($status) {
-            'saved'             => 'محفوظة (جديدة)',
-            'in_stock'          => 'في المخزن (جاهزة للتوزيع)',
-            'assigned'          => 'تم إسنادها للمندوب',
-            'with_courier'      => 'خرجت للتسليم',
-            'delivered'         => 'تم التسليم',
-            'returned_paid'     => 'مرتجع (تحصيل شحن)',
-            'returned_merchant' => 'مرتجع للراسل',
-            'cancelled'         => 'ملغاة',
-            'deferred'          => 'مؤجلة',
-            default             => $status,
-        };
-    }
-
-    public static function infolist(Infolist $infolist): Infolist
-    {
-        return $infolist
+        return $form
             ->schema([
-                // الهيدر (شكل روبوست)
-                Section::make()
+                Forms\Components\Section::make('معلومات التشغيل (Operation)')
                     ->schema([
-                        Grid::make(3)->schema([
-                            Group::make([
-                                TextEntry::make('barcode_visual')->label('')->getStateUsing(fn ($record) => $record->tracking_number)
-                                    ->formatStateUsing(function ($state) {
-                                        $generator = new BarcodeGeneratorSVG();
-                                        $barcodeSVG = $generator->getBarcode($state, $generator::TYPE_CODE_128, 2, 35);
-                                        return new HtmlString("<div class='flex flex-col items-center'><div class='bg-white p-2 rounded border'>{$barcodeSVG}</div><span class='text-xs font-bold mt-1'>{$state}</span></div>");
-                                    })->alignCenter(),
-                            ]),
-                            Group::make([
-                                TextEntry::make('tracking_number_label')->default('رقم التتبع')->label('')->weight(FontWeight::Bold)->alignCenter()->color('gray'),
-                                TextEntry::make('tracking_number')->label('')->copyable()
-                                    ->extraAttributes(['class' => 'bg-amber-50 text-amber-900 border border-amber-200 px-4 py-2 rounded-lg font-mono text-xl font-bold shadow-sm text-center block w-fit mx-auto'])->alignCenter(),
-                            ]),
-                            Group::make([
-                                TextEntry::make('status_label')->default('الحالة الحالية')->label('')->weight(FontWeight::Bold)->alignCenter()->color('gray'),
-                                TextEntry::make('status')->label('')->badge()
-                                    ->formatStateUsing(fn ($state) => self::getTranslatedStatus($state))
-                                    ->color(fn ($state) => match($state){'delivered'=>'success','cancelled','returned_merchant'=>'danger','saved'=>'gray',default=>'info'})
-                                    ->size(TextEntry\TextEntrySize::Large)->alignCenter(),
-                            ]),
-                        ])
-                    ])->compact()->extraAttributes(['class' => 'max-w-5xl mx-auto bg-white border border-gray-200 rounded-2xl p-4 mb-6 shadow-sm']),
+                        Forms\Components\Select::make('merchant_id')
+                            ->label('التاجر')
+                            ->relationship('merchant', 'name')
+                            ->searchable()
+                            ->required()
+                            ->live(),
+                        Forms\Components\Select::make('branch_id')
+                            ->label('الفرع المسؤول')
+                            ->relationship('branch', 'name')
+                            ->default(fn () => Auth::user()?->branch_id)
+                            ->required(),
+                    ])->columns(2),
 
-                // تفاصيل (تم حل مشكلة italic هنا بحذفها)
-                Grid::make(3)->schema([
-                    Section::make('العميل')->columnSpan(1)->schema([
-                        TextEntry::make('customer_name')->label('الاسم')->weight(FontWeight::Bold),
-                        TextEntry::make('customer_phone')->label('الموبايل')->icon('heroicon-m-phone')->copyable(),
-                        TextEntry::make('governorate.name')->label('المحافظة')->badge(),
-                        TextEntry::make('area.name')->label('المنطقة')->badge()->color('success'),
-                        TextEntry::make('customer_address')->label('العنوان')->columnSpanFull(),
-                    ])->compact(),
+                Forms\Components\Section::make('بيانات المستلم (Customer)')
+                    ->icon('heroicon-m-user')
+                    ->schema([
+                        Forms\Components\TextInput::make('customer_name')->label('اسم العميل')->required(),
+                        Forms\Components\TextInput::make('customer_phone')->label('رقم الهاتف')->tel()->required(),
+                        Forms\Components\Select::make('governorate_id')
+                            ->label('المحافظة')
+                            ->relationship('governorate', 'name')
+                            ->searchable()
+                            ->required()
+                            ->live(),
+                        Forms\Components\Select::make('area_id')
+                            ->label('المنطقة / المدينة')
+                            ->relationship('area', 'name', fn ($query, $get) =>
+                                $query->where('governorate_id', $get('governorate_id'))
+                            )
+                            ->searchable()
+                            ->required(),
+                        Forms\Components\Textarea::make('customer_address')->label('العنوان بالتفصيل')->required()->columnSpanFull(),
+                    ])->columns(3),
 
-                    Section::make('التنفيذ')->columnSpan(1)->schema([
-                        TextEntry::make('branch.name')->label('الفرع')->placeholder('لم يحدد'),
-                        TextEntry::make('courier.name')->label('المندوب')->placeholder('لم يعين')->color('warning'),
-                    ])->compact(),
-
-                    Section::make('الماليات')->columnSpan(1)->schema([
-                        TextEntry::make('amount')->label('السعر')->money('EGP'),
-                        TextEntry::make('shipping_fees')->label('الشحن')->money('EGP'),
-                        TextEntry::make('total_amount')->label('الصافي')->money('EGP')->weight(FontWeight::Black)
-                            ->extraAttributes(['class' => 'bg-emerald-600 text-white p-3 rounded-xl text-center shadow text-lg']),
-                    ])->compact(),
-                ]),
-
-                // سكشن المتابعة (للتأجيلات)
-                 Section::make('المتابعة')->schema([
-                    Grid::make(3)->schema([
-                        TextEntry::make('created_at')->label('تاريخ الإنشاء')->dateTime(),
-                        TextEntry::make('defers_count')->label('عدد التأجيلات')->badge()->color('danger'),
-                        TextEntry::make('defer_reason')->label('سبب التأجيل')->color('danger')->placeholder('---'),
-                    ])
-                 ])->compact()->visible(fn($record) => $record->defers_count > 0),
+                Forms\Components\Section::make('البيانات المالية (Financials)')
+                    ->icon('heroicon-m-currency-dollar')
+                    ->schema([
+                        Forms\Components\TextInput::make('amount')->label('قيمة الشحنة (COD)')->numeric()->prefix('EGP')->required(),
+                        Forms\Components\TextInput::make('shipping_fees')->label('مصاريف الشحن')->numeric()->prefix('EGP'),
+                        Forms\Components\DatePicker::make('expected_delivery_date')->label('موعد التسليم المتوقع')->default(now()->addDays(2)),
+                    ])->columns(3),
             ]);
     }
 
     public static function table(Table $table): Table
     {
         return $table
+            ->poll('10s')
             ->columns([
-                Tables\Columns\TextColumn::make('created_at')->dateTime()->label('التاريخ')->sortable(),
-                Tables\Columns\TextColumn::make('tracking_number')->label('الكود')->copyable()->searchable(),
-                Tables\Columns\TextColumn::make('branch.name')->label('الفرع')->badge()->color('gray'),
-                Tables\Columns\TextColumn::make('status')->label('الحالة')->badge()->formatStateUsing(fn($state) => self::getTranslatedStatus($state)),
+                Tables\Columns\TextColumn::make('tracking_number')
+                    ->label('البوليصة')
+                    ->searchable()
+                    ->weight('bold'),
+                Tables\Columns\TextColumn::make('merchant.name')->label('التاجر')->searchable(),
+                Tables\Columns\TextColumn::make('status')
+                    ->label('الحالة')
+                    ->badge()
+                    ->color(fn (string $state): string => match ($state) {
+                        Shipment::STATUS_SAVED => 'gray',
+                        Shipment::STATUS_IN_PROGRESS => 'warning',
+                        Shipment::STATUS_DELIVERED => 'success',
+                        Shipment::STATUS_RETURNED => 'danger',
+                        default => 'gray',
+                    }),
+                Tables\Columns\TextColumn::make('sub_status')->label('الموقف الحالي')->badge()->color('info'),
+                Tables\Columns\TextColumn::make('amount')->label('COD')->money('EGP')->weight('bold')->color('danger'),
             ])
             ->actions([
-                Tables\Actions\ViewAction::make(),
+                Tables\Actions\ViewAction::make()->label('فتح الكنترول'),
+                Tables\Actions\EditAction::make()->label('تعديل'),
+            ])
+            ->bulkActions([
+                Tables\Actions\BulkActionGroup::make([
 
-                // زر التعيين السريع في الجدول (تم إصلاحه ليفلتر حسب الفرع)
-                Tables\Actions\Action::make('quick_assign')
-                    ->label('تعيين')
-                    ->icon('heroicon-m-user-plus')
-                    ->color('warning')
-                    ->visible(fn($record) => $record->status === 'in_stock')
-                    ->form([
-                        Forms\Components\Select::make('courier_id')
-                            ->label('المندوب')
-                            ->options(fn($record) => User::where('branch_id', $record->branch_id)->pluck('name', 'id'))
-                            ->required(),
-                    ])
-                    ->action(function (Shipment $record, array $data) {
-                        $record->update(['courier_id' => $data['courier_id'], 'status' => 'assigned']);
-                        Notification::make()->title('تم التعيين')->success()->send();
-                    }),
+                    // 🚚 1. قبول جماعي (يظهر في تاب المحفوظة)
+                    Tables\Actions\BulkAction::make('bulk_accept')
+                        ->label('قبول في الفرع')
+                        ->icon('heroicon-m-check-badge')
+                        ->color('success')
+                        ->visible(fn ($livewire) => $livewire->activeTab === 'saved')
+                        ->action(function (Collection $records) {
+                            $records->each->update([
+                                'status' => Shipment::STATUS_IN_PROGRESS,
+                                'sub_status' => Shipment::SUB_IN_STOCK,
+                                'current_location' => Shipment::LOCATION_BRANCH
+                            ]);
+                            Notification::make()->title('تم قبول الشحنات بنجاح')->success()->send();
+                        }),
+
+                    // 🛵 2. تعيين لمندوب (يظهر في تاب المخزن)
+                    Tables\Actions\BulkAction::make('bulk_assign')
+                        ->label('تعيين لمندوب')
+                        ->icon('heroicon-m-user-plus')
+                        ->color('info')
+                        ->visible(fn ($livewire) => $livewire->activeTab === 'in_stock')
+                        ->form([
+                            Forms\Components\Select::make('courier_id')
+                                ->label('اختر المندوب')
+                                ->options(fn () => Courier::where('branch_id', Auth::user()?->branch_id)->pluck('name', 'id'))
+                                ->required(),
+                        ])
+                        ->action(function (Collection $records, array $data) {
+                            $records->each->update([
+                                'sub_status' => Shipment::SUB_ASSIGNED,
+                                'courier_id' => $data['courier_id']
+                            ]);
+                            Notification::make()->title('تم التعيين للمندوب')->success()->send();
+                        }),
+
+                    // ✅ 3. تم التسليم (يظهر في المخزن أو مع المندوب)
+                    Tables\Actions\BulkAction::make('bulk_delivered')
+                        ->label('تأكيد تسليم (Delivered)')
+                        ->icon('heroicon-m-check-circle')
+                        ->color('success')
+                        ->visible(fn ($livewire) => in_array($livewire->activeTab, ['in_stock', 'with_courier', 'assigned']))
+                        ->requiresConfirmation()
+                        ->action(function (Collection $records, \App\Services\Finance\DeliveryFinanceService $service) {
+                            foreach ($records as $record) {
+                                // هنا بننادي السيرفس اللي بتودي الفلوس في عهدة المندوب فقط
+                                $service->onDelivered($record, Auth::id());
+
+                                $record->update([
+                                    'status' => Shipment::STATUS_DELIVERED,
+                                    'sub_status' => null,
+                                    'delivered_at' => now()
+                                ]);
+                            }
+                            Notification::make()->title('تم تحديث الشحنات لـ تم التسليم وفي عهدة المندوب')->success()->send();
+                        }),
+
+                    // 💰 4. توريد عهدة (Handover) - يظهر فقط في تاب "تم التسليم"
+                    Tables\Actions\BulkAction::make('bulk_handover')
+                        ->label('توريد عهدة (Handover)')
+                        ->icon('heroicon-m-banknotes')
+                        ->color('success')
+                        ->visible(fn ($livewire) => $livewire->activeTab === 'delivered')
+                        ->requiresConfirmation()
+                        ->action(function (Collection $records) {
+                            // TODO: سيتم ربطها بـ HandoverService لنقل الأموال من المندوب للفرع والتاجر
+                            Notification::make()->title('جاري معالجة توريد النقدية...')->info()->send();
+                        }),
+
+                    // ⏰ 5. تأجيل (جماعي)
+                    Tables\Actions\BulkAction::make('bulk_postpone')
+                        ->label('تأجيل المختار')
+                        ->icon('heroicon-m-clock')
+                        ->color('warning')
+                        ->visible(fn ($livewire) => in_array($livewire->activeTab, ['in_stock', 'with_courier']))
+                        ->form([
+                            Forms\Components\DatePicker::make('date')->label('تأجيل إلى تاريخ')->required(),
+                        ])
+                        ->action(function (Collection $records, array $data) {
+                            $records->each->update([
+                                'sub_status' => Shipment::SUB_DEFERRED,
+                                'expected_delivery_date' => $data['date']
+                            ]);
+                        }),
+
+                    // ↩️ 6. المرتجعات الجماعية (تظهر في تاب المخزن أو مع المندوب)
+                    Tables\Actions\BulkAction::make('bulk_ret_sender')
+                        ->label('مرتجع على الراسل')
+                        ->icon('heroicon-m-arrow-uturn-left')
+                        ->color('danger')
+                        ->visible(fn ($livewire) => in_array($livewire->activeTab, ['in_stock', 'with_courier']))
+                        ->action(fn (Collection $records) => $records->each->update(['status' => Shipment::STATUS_RETURNED, 'return_reason' => 'على الراسل'])),
+
+                    Tables\Actions\BulkAction::make('bulk_ret_paid')
+                        ->label('مرتجع مدفوع')
+                        ->icon('heroicon-m-banknotes')
+                        ->color('warning')
+                        ->visible(fn ($livewire) => in_array($livewire->activeTab, ['in_stock', 'with_courier']))
+                        ->action(fn (Collection $records) => $records->each->update(['status' => Shipment::STATUS_RETURNED, 'return_reason' => 'مدفوع'])),
+
+                    Tables\Actions\DeleteBulkAction::make()->label('حذف المختار'),
+                ])->label('الأوامر ')->icon('heroicon-m-bolt'),
             ]);
-    }
-
-    public static function form(Form $form): Form
-    {
-        return $form->schema([
-            Forms\Components\Section::make('بيانات الشحنة')->schema([
-                Forms\Components\Select::make('merchant_id')->relationship('merchant', 'name')->required()->label('التاجر'),
-                Forms\Components\TextInput::make('customer_name')->required()->label('العميل'),
-                Forms\Components\TextInput::make('customer_phone')->required()->label('الموبايل'),
-                Forms\Components\Select::make('governorate_id')->relationship('governorate', 'name')->required()->label('المحافظة')->live(),
-                Forms\Components\Select::make('area_id')->required()->label('المنطقة')
-                    ->options(fn (Forms\Get $get) => Area::where('governorate_id', $get('governorate_id'))->pluck('name', 'id')),
-                Forms\Components\TextInput::make('amount')->numeric()->label('المبلغ'),
-                Forms\Components\Textarea::make('customer_address')->required()->columnSpanFull(),
-            ])->columns(2),
-        ]);
     }
 
     public static function getPages(): array

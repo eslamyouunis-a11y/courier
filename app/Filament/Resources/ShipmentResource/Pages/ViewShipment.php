@@ -3,146 +3,196 @@
 namespace App\Filament\Resources\ShipmentResource\Pages;
 
 use App\Filament\Resources\ShipmentResource;
+use App\Models\Shipment;
+use App\Services\Finance\DeliveryFinanceService;
+use App\Services\Finance\ReturnToSenderFinanceService;
 use Filament\Actions;
+use Filament\Forms;
+use Filament\Infolists;
+use Filament\Infolists\Infolist;
 use Filament\Resources\Pages\ViewRecord;
-use Filament\Actions\Action;
-use Filament\Actions\ActionGroup;
-use App\Models\Branch;
-use App\Models\User;
+use Filament\Support\Enums\FontWeight;
 use Filament\Notifications\Notification;
+use Illuminate\Support\Facades\Auth;
 
 class ViewShipment extends ViewRecord
 {
     protected static string $resource = ShipmentResource::class;
 
+    public function infolist(Infolist $infolist): Infolist
+    {
+        return $infolist
+            ->schema([
+                // === القسم 1: الهيدر (الهوية) ===
+                Infolists\Components\Section::make()
+                    ->schema([
+                        Infolists\Components\Split::make([
+                            Infolists\Components\Grid::make(1)->schema([
+                                Infolists\Components\TextEntry::make('tracking_number')
+                                    ->label('رقم البوليصة')
+                                    ->weight(FontWeight::Black)
+                                    ->size(Infolists\Components\TextEntry\TextEntrySize::Large)
+                                    ->copyable()
+                                    ->icon('heroicon-m-qr-code'),
+
+                                Infolists\Components\TextEntry::make('merchant.name')
+                                    ->label('التاجر')
+                                    ->icon('heroicon-m-building-storefront'),
+                            ]),
+
+                            Infolists\Components\Grid::make(3)->schema([
+                                Infolists\Components\TextEntry::make('status')->label('الحالة الرئيسية')->badge(),
+                                Infolists\Components\TextEntry::make('sub_status')->label('الموقف التشغيلي')->badge()->color('gray'),
+                                Infolists\Components\TextEntry::make('current_location')
+                                    ->label('مكان الشحنة')
+                                    ->formatStateUsing(fn (Shipment $record) =>
+                                        $record->current_location === 'branch'
+                                        ? "فرع: {$record->currentBranch?->name}"
+                                        : "مع: {$record->currentCourier?->name}"
+                                    )
+                                    ->icon('heroicon-m-map-pin')
+                                    ->color('warning'),
+                            ]),
+                        ])->from('md'),
+                    ]),
+
+                // === القسم 2 و 3: العميل والمالية ===
+                Infolists\Components\Split::make([
+                    Infolists\Components\Section::make('بيانات العميل')
+                        ->icon('heroicon-m-user')
+                        ->schema([
+                            Infolists\Components\TextEntry::make('customer_name')->label('الاسم'),
+                            Infolists\Components\TextEntry::make('customer_phone')
+                                ->label('الهاتف')
+                                ->url(fn ($state) => "tel:{$state}")
+                                ->icon('heroicon-m-phone'),
+                            Infolists\Components\TextEntry::make('customer_address')->label('العنوان')->icon('heroicon-m-map')->columnSpanFull(),
+                            Infolists\Components\TextEntry::make('governorate.name')->label('المحافظة'),
+                            Infolists\Components\TextEntry::make('area.name')->label('المنطقة'),
+                        ])->columns(2),
+
+                    Infolists\Components\Section::make('الموقف المالي')
+                        ->icon('heroicon-m-currency-dollar')
+                        ->schema([
+                            Infolists\Components\TextEntry::make('amount')->label('مطلوب (COD)')->money('EGP')->size(Infolists\Components\TextEntry\TextEntrySize::Large)->weight('bold')->color('danger'),
+                            Infolists\Components\TextEntry::make('shipping_fees')->label('مصاريف الشحن')->money('EGP'),
+                            Infolists\Components\TextEntry::make('total_amount')->label('الإجمالي')->money('EGP')->color('gray'),
+                        ])->columns(3),
+                ])->from('lg'),
+
+                // === القسم 4: الـ Timeline ===
+                Infolists\Components\Section::make('سجل التواريخ والتشغيل')
+                    ->schema([
+                        Infolists\Components\TextEntry::make('created_at')->label('تاريخ الإنشاء')->dateTime(),
+                        Infolists\Components\TextEntry::make('executed_at')->label('خروج للمندوب')->dateTime()->placeholder('-'),
+                        Infolists\Components\TextEntry::make('delivered_at')->label('تاريخ التسليم')->dateTime()->placeholder('-'),
+                        Infolists\Components\TextEntry::make('expected_delivery_date')->label('التسليم المتوقع')->date()->color('success'),
+
+                        Infolists\Components\TextEntry::make('last_deferred_at')->label('آخر تأجيل')->dateTime()->visible(fn (Shipment $record) => $record->defers_count > 0),
+                        Infolists\Components\TextEntry::make('defer_reason')->label('سبب التأجيل')->visible(fn (Shipment $record) => $record->defers_count > 0)->color('danger'),
+                    ])->columns(4)->collapsed(),
+            ]);
+    }
+
     protected function getHeaderActions(): array
     {
-        $record = $this->getRecord();
-        $actions = [];
-
-        // 1. الشحنة لسه جديدة (Saved) -> لازم نقبلها في فرع الأول
-        if ($record->status === 'saved') {
-            $actions[] = Action::make('accept')
-                ->label('قبول في فرع')
-                ->icon('heroicon-o-check-badge')
-                ->color('success')
+        return [
+            // 1. خروج للمندوب
+            Actions\Action::make('dispatch_to_courier')
+                ->label('تسليم للمندوب')
+                ->icon('heroicon-m-truck')
+                ->color('warning')
+                ->visible(fn (Shipment $record) =>
+                    $record->status === Shipment::STATUS_IN_PROGRESS &&
+                    in_array($record->sub_status, [Shipment::SUB_IN_STOCK, Shipment::SUB_ASSIGNED, Shipment::SUB_DEFERRED])
+                )
                 ->form([
-                    \Filament\Forms\Components\Select::make('branch_id')
-                        ->label('اختر الفرع المستلم')
-                        ->options(Branch::pluck('name', 'id'))
+                    Forms\Components\Select::make('courier_id')
+                        ->label('اختر المندوب')
+                        ->relationship('courier', 'name')
                         ->required(),
                 ])
-                ->action(function (array $data) {
-                    $this->record->update([
-                        'status' => 'in_stock',
-                        'branch_id' => $data['branch_id'],
-                        'accepted_at' => now(), // لو عندك العمود دة
-                    ]);
-                    Notification::make()->title('تم قبول الشحنة في المخزن')->success()->send();
-                });
-
-             $actions[] = Action::make('delete')
-                ->label('حذف')
-                ->icon('heroicon-o-trash')
-                ->color('danger')
-                ->requiresConfirmation()
-                ->action(fn() => $this->record->delete());
-        }
-
-        // 2. الشحنة في المخزن (In Stock) -> هنا نعين المندوب بتاع نفس الفرع
-        elseif ($record->status === 'in_stock') {
-            $actions[] = Action::make('assign_courier')
-                ->label('تعيين لمندوب')
-                ->icon('heroicon-o-user-plus')
-                ->color('warning')
-                ->form([
-                    \Filament\Forms\Components\Select::make('courier_id')
-                        ->label('اختر المندوب')
-                        // هنا الحل: بنجيب المستخدمين اللي في نفس فرع الشحنة دي بس
-                        ->options(function() use ($record) {
-                            return User::where('branch_id', $record->branch_id)->pluck('name', 'id');
-                        })
-                        ->required()
-                        ->searchable()
-                        ->preload(),
-                ])
-                ->action(function (array $data) {
-                    $this->record->update([
+                ->action(function (Shipment $record, array $data) {
+                    $record->update([
+                        'sub_status' => Shipment::SUB_WITH_COURIER,
+                        'current_location' => Shipment::LOCATION_COURIER,
+                        'current_courier_id' => $data['courier_id'],
                         'courier_id' => $data['courier_id'],
-                        'status' => 'assigned',
+                        'executed_at' => now(),
                     ]);
-                    Notification::make()->title('تم تعيين المندوب')->success()->send();
-                });
+                    Notification::make()->title('خرجت مع المندوب')->success()->send();
+                }),
 
-            $actions[] = Action::make('defer_stock')
-                ->label('تأجيل')
-                ->form([
-                    \Filament\Forms\Components\DatePicker::make('date')->required()->label('تاريخ جديد'),
-                    \Filament\Forms\Components\Select::make('reason')
-                        ->options(['customer_request' => 'طلب عميل', 'out_of_zone' => 'خارج التغطية'])
-                        ->required()->label('السبب'),
-                ])
-                ->action(function($data) {
-                     $this->record->increment('defers_count');
-                     $this->record->update(['expected_delivery_date'=>$data['date'], 'defer_reason'=>$data['reason']]);
-                     Notification::make()->title('تم التأجيل')->success()->send();
-                });
-        }
-
-        // 3. تم التعيين (Assigned) -> المندوب يستلم العهدة
-        elseif ($record->status === 'assigned') {
-            $actions[] = Action::make('handover')
-                ->label('تسليم العهدة للمندوب')
-                ->icon('heroicon-o-truck')
-                ->color('success')
-                ->action(fn() => $this->record->update(['status' => 'with_courier']));
-
-            $actions[] = Action::make('cancel_assign')
-                ->label('إلغاء التعيين (رجوع للمخزن)')
-                ->icon('heroicon-o-arrow-uturn-left')
-                ->color('danger')
-                ->action(fn() => $this->record->update(['status' => 'in_stock', 'courier_id' => null]));
-        }
-
-        // 4. مع المندوب (With Courier) -> تسليم نهائي أو مرتجع أو تأجيل
-        elseif (in_array($record->status, ['with_courier', 'deferred'])) {
-            $actions[] = Action::make('delivered')
-                ->label('تم التسليم بنجاح')
-                ->icon('heroicon-o-check-circle')
+            // 2. تسليم (Delivered)
+            Actions\Action::make('mark_delivered')
+                ->label('تسليم (Delivered)')
+                ->icon('heroicon-m-check-badge')
                 ->color('success')
                 ->requiresConfirmation()
-                ->action(fn() => $this->record->update(['status' => 'delivered']));
+                ->visible(fn (Shipment $record) => $record->isWithCourier())
+                ->action(function (Shipment $record, DeliveryFinanceService $service) {
+                    try {
+                        $service->onDelivered($record, Auth::id());
+                        $record->update([
+                            'status' => Shipment::STATUS_DELIVERED,
+                            'sub_status' => null,
+                            'delivered_at' => now(),
+                            'current_courier_id' => null,
+                        ]);
+                        Notification::make()->title('تم التسليم بنجاح')->success()->send();
+                    } catch (\Exception $e) {
+                        Notification::make()->title('خطأ')->body($e->getMessage())->danger()->send();
+                    }
+                }),
 
-            $actions[] = ActionGroup::make([
-                Action::make('ret_paid')
-                    ->label('مرتجع مدفوع (شحن)')
-                    ->form([
-                        \Filament\Forms\Components\TextInput::make('paid')->label('المبلغ المحصل')->numeric()->required(),
-                        \Filament\Forms\Components\Select::make('reason')->options(['refused'=>'رفض الاستلام','wrong_item'=>'خطأ في الصنف'])->required(),
-                    ])
-                    ->action(fn($data) => $this->record->update(['status'=>'returned_paid', 'paid_amount'=>$data['paid'], 'return_reason'=>$data['reason']])),
-
-                Action::make('ret_merchant')
-                    ->label('مرتجع كامل للراسل')
-                    ->form([\Filament\Forms\Components\Select::make('reason')->options(['cancelled'=>'إلغاء','damaged'=>'تالف'])->required()])
-                    ->action(fn($data) => $this->record->update(['status'=>'returned_merchant', 'return_reason'=>$data['reason']])),
-            ])->label('تسجيل مرتجع')->icon('heroicon-o-x-circle')->color('danger');
-
-            $actions[] = Action::make('defer_courier')
-                ->label('تأجيل')
+            // 3. مرتجع (Returned)
+            Actions\Action::make('mark_returned')
+                ->label('مرتجع (Returned)')
+                ->icon('heroicon-m-x-circle')
+                ->color('danger')
+                ->visible(fn (Shipment $record) => $record->isWithCourier())
                 ->form([
-                    \Filament\Forms\Components\DatePicker::make('date')->required(),
-                    \Filament\Forms\Components\Textarea::make('reason')->required(),
+                    Forms\Components\Select::make('return_type')
+                        ->options(['sender' => 'على الراسل', 'paid' => 'مرتجع مدفوع'])
+                        ->required(),
+                    Forms\Components\Textarea::make('reason')->label('سبب الارتجاع')->required(),
                 ])
-                ->action(function($data){
-                    $this->record->increment('defers_count');
-                    $this->record->update(['status'=>'deferred', 'expected_delivery_date'=>$data['date'], 'defer_reason'=>$data['reason']]);
-                });
-        }
+                ->action(function (Shipment $record, array $data, ReturnToSenderFinanceService $service) {
+                    if ($data['return_type'] === 'sender') {
+                        $service->handle($record, Auth::id());
+                    }
+                    $record->update([
+                        'status' => Shipment::STATUS_RETURNED,
+                        'sub_status' => Shipment::SUB_TRANSFERRED,
+                        'current_location' => Shipment::LOCATION_BRANCH,
+                        'current_courier_id' => null,
+                        'return_reason' => $data['reason'],
+                    ]);
+                    Notification::make()->title('تم تسجيل المرتجع')->success()->send();
+                }),
 
-        return [
-            ActionGroup::make($actions)->label('الأوامر')->icon('heroicon-m-chevron-down')->button()->color('primary'),
-            Actions\EditAction::make()->label('تعديل البيانات'),
+            // 4. تأجيل (Postpone)
+            Actions\Action::make('postpone')
+                ->label('تأجيل (Postpone)')
+                ->icon('heroicon-m-clock')
+                ->color('gray')
+                ->visible(fn (Shipment $record) => $record->isWithCourier())
+                ->form([
+                    Forms\Components\DatePicker::make('deferred_to_date')->label('تاريخ التأجيل')->minDate(now())->required(),
+                    Forms\Components\TextInput::make('defer_reason')->label('سبب التأجيل')->required(),
+                ])
+                ->action(function (Shipment $record, array $data) {
+                    $record->update([
+                        'sub_status' => Shipment::SUB_DEFERRED,
+                        'current_location' => Shipment::LOCATION_BRANCH,
+                        'current_courier_id' => null,
+                        'deferred_to_date' => $data['deferred_to_date'],
+                        'defer_reason' => $data['defer_reason'],
+                        'last_deferred_at' => now(),
+                        'defers_count' => $record->defers_count + 1,
+                    ]);
+                    Notification::make()->title('تم تأجيل الشحنة')->success()->send();
+                }),
         ];
     }
 }
